@@ -1,4 +1,5 @@
-# Master Lookup Table for Base Derivatives
+import re
+
 BASE_DERIVATIVES = {
     "sin": ("cos", 1),
     "cos": ("sin", -1),
@@ -11,102 +12,132 @@ BASE_DERIVATIVES = {
 }
 
 
-def differentiate_chain_stack(stack, target_var, constant=1.0):
-    """Differentiates a chain stack like ['sin', 'cos', 'u']."""
-    base_var = stack[-1]
+def diff_expression(expr_str, target_var):
+    """Differentiates basic polynomial/linear inner expressions like '2x+1' or 'x^2'."""
+    expr_str = expr_str.replace(" ", "")
 
-    if base_var != target_var:
+    # Match simple linear/polynomial patterns (e.g. 2x, x, x^2, x+1)
+    if expr_str == target_var:
+        return "1"
+
+    # Match ax^n
+    match_pow = re.match(
+        rf"^([+-]?\d*\.?\d*){re.escape(target_var)}\^(\d+)$", expr_str
+    )
+    if match_pow:
+        coeff_str, p_str = match_pow.groups()
+        coeff = float(coeff_str) if coeff_str not in ("", "+", "-") else (
+            -1.0 if coeff_str == "-" else 1.0
+        )
+        p = int(p_str)
+        new_c = coeff * p
+        new_p = p - 1
+        c_fmt = f"{new_c:g}" if new_c != 1 else ""
+        return f"{c_fmt}{target_var}^{new_p}" if new_p > 1 else f"{c_fmt}{target_var}"
+
+    # Match ax + b or ax - b
+    match_lin = re.match(
+        rf"^([+-]?\d*\.?\d*){re.escape(target_var)}([+-]\d+\.?\d*)?$", expr_str
+    )
+    if match_lin:
+        coeff_str = match_lin.group(1)
+        coeff = float(coeff_str) if coeff_str not in ("", "+", "-") else (
+            -1.0 if coeff_str == "-" else 1.0
+        )
+        return f"{coeff:g}"
+
+    return "1"  # Default fallback for unparsed inner derivatives
+
+
+def differentiate_chain_stack(funcs, inner_expr, target_var, constant=1.0):
+    """Applies Chain Rule with custom inner expressions like cos(x+1)."""
+    if target_var not in inner_expr:
         return {"result_str": "0", "is_zero": True}
 
-    func_layers = stack[:-1]
+    inner_diff = diff_expression(inner_expr, target_var)
 
-    if not func_layers:
+    if not funcs:
         c_fmt = f"{constant:g}" if constant != 1.0 else ""
-        return {"result_str": f"{c_fmt}{base_var}", "is_zero": False}
+        return {"result_str": f"{c_fmt}{inner_diff}", "is_zero": False}
 
     derived_parts = []
     current_sign = 1.0
-    inner_expr = base_var
+    current_inner = inner_expr
 
-    for i in range(len(func_layers) - 1, -1, -1):
-        f = func_layers[i]
+    for i in range(len(funcs) - 1, -1, -1):
+        f = funcs[i]
         d_func, sign = BASE_DERIVATIVES[f]
         current_sign *= sign
 
-        if i == len(func_layers) - 1:
+        if i == len(funcs) - 1:
             if d_func == "1/x":
-                derived_parts.append(f"(1/{base_var})")
+                derived_parts.append(f"(1/({inner_expr}))")
             else:
-                derived_parts.append(f"{d_func}({base_var})")
+                derived_parts.append(f"{d_func}({inner_expr})")
         else:
-            if "x" in d_func:
-                term = d_func.replace("x", inner_expr)
-            else:
-                term = f"{d_func}({inner_expr})"
+            term = f"{d_func}({current_inner})"
             derived_parts.append(term)
 
-        inner_expr = f"{f}({inner_expr})"
+        current_inner = f"{f}({current_inner})"
+
+    # Multiply by inner derivative if it's not 1
+    if inner_diff != "1":
+        derived_parts.append(f"({inner_diff})")
 
     final_const = constant * current_sign
-    if final_const == 1:
-        c_str = ""
-    elif final_const == -1:
-        c_str = "-"
-    else:
-        c_str = f"{final_const:g}"
+    c_str = "" if final_const == 1 else ("-" if final_const == -1 else f"{final_const:g}")
 
     return {"result_str": c_str + "".join(derived_parts), "is_zero": False}
 
 
 def differentiate_multi_term(term_data, target_var):
-    """Differentiates a multi-variable product term without '*'."""
+    """Differentiates products handling inner functions."""
     brackets = term_data.get("brackets", [])
     const = term_data.get("const", 1.0)
 
-    target_idx = -1
-    for idx, stack in enumerate(brackets):
-        if stack[-1] == target_var:
-            target_idx = idx
-            break
+    target_indices = [
+        i for i, b in enumerate(brackets) if target_var in b["inner"]
+    ]
 
-    if target_idx == -1:
+    if not target_indices:
         return "0"
 
-    diff_res = differentiate_chain_stack(
-        brackets[target_idx], target_var, constant=1.0
-    )
-    if diff_res["is_zero"]:
-        return "0"
+    # Single matching variable in term
+    if len(target_indices) == 1:
+        idx = target_indices[0]
+        diff_res = differentiate_chain_stack(
+            brackets[idx]["funcs"], brackets[idx]["inner"], target_var, constant=1.0
+        )
+        if diff_res["is_zero"]:
+            return "0"
 
-    parts = []
-    for idx, stack in enumerate(brackets):
-        if idx == target_idx:
-            parts.append(f"({diff_res['result_str']})")
-        else:
-            b_var = stack[-1]
-            funcs = stack[:-1]
-            expr = b_var
-            for f in reversed(funcs):
-                expr = f"{f}({expr})"
-            parts.append(expr)
+        parts = []
+        for i, b in enumerate(brackets):
+            if i == idx:
+                parts.append(f"({diff_res['result_str']})")
+            else:
+                expr = b["inner"]
+                for f in reversed(b["funcs"]):
+                    expr = f"{f}({expr})"
+                parts.append(expr)
 
-    c_fmt = "" if const == 1.0 else ("-" if const == -1.0 else f"{const:g}")
-    return c_fmt + "".join(parts)
+        c_fmt = "" if const == 1.0 else ("-" if const == -1.0 else f"{const:g}")
+        return c_fmt + "".join(parts)
+
+    return "0"
 
 
 def format_term_display(term_data):
-    """Formats a term dictionary cleanly without '*'."""
+    """Formats expressions nicely without '*'."""
     brackets = term_data.get("brackets", [])
     const = term_data.get("const", 1.0)
 
     c_str = "" if const == 1.0 else ("-" if const == -1.0 else f"{const:g}")
     b_strs = []
 
-    for stack in brackets:
-        b_var = stack[-1]
-        funcs = stack[:-1]
-        expr = b_var
-        for f in reversed(funcs):
+    for b in brackets:
+        expr = b["inner"]
+        for f in reversed(b["funcs"]):
             expr = f"{f}({expr})"
         b_strs.append(expr)
 
@@ -116,7 +147,7 @@ def format_term_display(term_data):
 def display_current_system(system_terms):
     print("\n--- CURRENT FUNCTION SYSTEM ---")
     if not system_terms:
-        print("f(...) = 0 (No terms added yet)")
+        print("f(...) = 0")
     else:
         formatted = [format_term_display(t) for t in system_terms]
         print("f(...) = " + " + ".join(formatted).replace("+ -", "- "))
@@ -128,21 +159,17 @@ def main_menu():
 
     while True:
         print("===============================")
-        print("    DIFFERENTIATION MENU      ")
+        print("    DIFFERENTIATION MENU v2    ")
         print("===============================")
-        print("1. Add Single Composite Term (e.g. 3sin(cos(u)))")
-        print("2. Add Multi-Variable Product Term (e.g. 4sin(u)exp(h))")
-        print("3. Display Current System")
-        print("4. Differentiate System (Partial / Total)")
-        print("5. Reset All Terms")
+        print("1. Add Composite Term with Inner Expr (e.g. 5cos(x+1))")
+        print("2. Display Current System")
+        print("3. Differentiate System")
+        print("4. Reset System")
         print("E. Exit")
 
         choice = input("\nChoose an option: ").strip().upper()
 
         if choice == "1":
-            var_name = input(
-                "Enter custom variable name (e.g. u, h, x, theta): "
-            ).strip()
             try:
                 const = float(
                     input("Enter constant multiplier (default 1.0): ") or "1.0"
@@ -150,9 +177,13 @@ def main_menu():
             except ValueError:
                 const = 1.0
 
-            print("\nSupported functions:", ", ".join(BASE_DERIVATIVES.keys()))
+            inner = input(
+                "Enter inner expression (e.g. x+1, 2u, x^2): "
+            ).strip()
+
+            print("Supported functions:", ", ".join(BASE_DERIVATIVES.keys()))
             funcs_str = input(
-                "Enter nested functions from OUTSIDE to INSIDE separated by commas (e.g. sin, cos): "
+                "Enter outer functions from outside to inside (e.g. cos) or leave blank: "
             ).strip()
 
             func_list = (
@@ -161,78 +192,32 @@ def main_menu():
                 else []
             )
 
-            valid = True
-            for f in func_list:
-                if f not in BASE_DERIVATIVES:
-                    print(f"Error: Function '{f}' is not supported!")
-                    valid = False
-                    break
-
-            if valid:
-                stack = func_list + [var_name]
-                system_terms.append({"brackets": [stack], "const": const})
-                print("Term added successfully!")
-                display_current_system(system_terms)
+            system_terms.append(
+                {"brackets": [{"funcs": func_list, "inner": inner}], "const": const}
+            )
+            print("Term added successfully!")
+            display_current_system(system_terms)
 
         elif choice == "2":
-            try:
-                const = float(
-                    input("Enter total constant multiplier (default 1.0): ")
-                    or "1.0"
-                )
-            except ValueError:
-                const = 1.0
-
-            num_vars = int(
-                input("How many different variables in this product term?: ")
-            )
-            brackets = []
-
-            for i in range(1, num_vars + 1):
-                print(f"\n--- Variable #{i} ---")
-                var_name = input("Enter variable name (e.g. u, h, x): ").strip()
-                funcs_str = input(
-                    f"Enter functions for {var_name} (outer to inner, or press Enter for plain {var_name}): "
-                ).strip()
-
-                func_list = (
-                    [
-                        f.strip().lower()
-                        for f in funcs_str.split(",")
-                        if f.strip()
-                    ]
-                    if funcs_str
-                    else []
-                )
-
-                stack = func_list + [var_name]
-                brackets.append(stack)
-
-            system_terms.append({"brackets": brackets, "const": const})
-            print("\nMulti-variable product term added!")
             display_current_system(system_terms)
 
         elif choice == "3":
-            display_current_system(system_terms)
-
-        elif choice == "4":
             if not system_terms:
-                print("\nNo terms to differentiate! Please add terms first.")
+                print("\nNo terms to differentiate!")
                 continue
 
-            display_current_system(system_terms)
             target_var = input(
-                "Which variable do you want to differentiate with respect to?: "
+                "Differentiate with respect to variable (e.g. x, u): "
             ).strip()
-
             diff_results = []
+
             for term in system_terms:
                 res = differentiate_multi_term(term, target_var)
                 if res != "0":
                     diff_results.append(res)
 
             print("\n==========================================")
-            print(f" PARTIAL DERIVATIVE: ∂f / ∂{target_var}")
+            print(f" DERIVATIVE w.r.t {target_var}:")
             print("==========================================")
             if not diff_results:
                 print(f"∂f / ∂{target_var} = 0")
@@ -241,12 +226,11 @@ def main_menu():
                 print(f"∂f / ∂{target_var} = {out}")
             print("==========================================\n")
 
-        elif choice == "5":
+        elif choice == "4":
             system_terms.clear()
-            print("\nSystem cleared!")
+            print("\nCleared system!")
 
         elif choice == "E":
-            print("Goodbye!")
             break
 
 
