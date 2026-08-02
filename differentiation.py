@@ -13,32 +13,67 @@ BASE_DERIVATIVES = {
 
 
 def contains_var(expr, target_var):
-    """Uses regex word boundary to prevent substring false positives (e.g., 'x' inside 'tax')."""
+    """Uses regex word boundaries to accurately detect isolated variables without false positives."""
     return bool(re.search(rf"\b{re.escape(target_var)}\b", expr))
 
 
+def simplify_expression_str(expr_str):
+    """Cleans up redundant 1s, empty parentheses, and awkward product formatting."""
+    if not expr_str:
+        return "0"
+
+    # Clean up redundant multiplication by 1 or (1)
+    expr_str = re.sub(r"\(1\)", "", expr_str)
+    expr_str = re.sub(r"\(1\.0\)", "", expr_str)
+    expr_str = re.sub(r"\b1\*", "", expr_str)
+    expr_str = re.sub(r"\*1\b", "", expr_str)
+
+    # Clean up empty parentheses or double spaces
+    expr_str = expr_str.replace("()", "")
+    expr_str = re.sub(r"\s+", " ", expr_str).strip()
+
+    # Clean up plus/minus artifacts
+    expr_str = expr_str.replace("+ -", "- ")
+    expr_str = expr_str.replace("- -", "+ ")
+
+    return expr_str if expr_str else "1"
+
+
 def diff_expression(expr_str, target_var):
-    """Differentiates linear/polynomial expressions (e.g. x+1, x^2+1, 2*x, x*2)."""
+    """Differentiates linear, polynomial, and basic transcendental inner expressions cleanly."""
     expr_str = expr_str.replace(" ", "")
 
     if not contains_var(expr_str, target_var):
         return "0"
 
-    # Match polynomial sum terms like x^2+1, 2x-5, x^2+3x+2
-    # Standardize explicit multiplication for parsing
+    # Check for direct transcendental functions inside inner string (e.g. sin(x))
+    for func in BASE_DERIVATIVES:
+        pattern = rf"^{func}\((.*)\)$"
+        match_func = re.match(pattern, expr_str)
+        if match_func:
+            inner_arg = match_func.group(1)
+            d_func, sign = BASE_DERIVATIVES[func]
+            inner_diff = diff_expression(inner_arg, target_var)
+            s_str = "-" if sign == -1 else ""
+
+            if inner_diff == "1":
+                return f"{s_str}{d_func}({inner_arg})"
+            elif inner_diff == "0":
+                return "0"
+            else:
+                return f"{s_str}{d_func}({inner_arg})*({inner_diff})"
+
+    # Handle standard polynomial terms (e.g., x^2+1, 2x-5, 3*x^3)
     expr_clean = re.sub(
         rf"(\d)({re.escape(target_var)})", r"\1*\2", expr_str
     )
-
-    # Split expression into addition/subtraction terms while retaining signs
     terms = re.findall(r"[+-]?[^+-]+", expr_clean)
     diff_terms = []
 
     for term in terms:
         if not contains_var(term, target_var):
-            continue  # Constants drop to 0
+            continue
 
-        # Match c*x^n or x^n*c or c*x or x*c or x^n
         match_pow = re.match(
             rf"^([+-]?\d*\.?\d*)?\*?{re.escape(target_var)}(?:\^(\d+))?\*?(\d*\.?\d*)?$",
             term,
@@ -46,7 +81,6 @@ def diff_expression(expr_str, target_var):
         if match_pow:
             c1_str, p_str, c2_str = match_pow.groups()
 
-            # Calculate total coefficient
             c1 = (
                 float(c1_str)
                 if c1_str not in ("", "+", "-")
@@ -56,13 +90,11 @@ def diff_expression(expr_str, target_var):
             coeff = c1 * c2
 
             p = int(p_str) if p_str else 1
-
             new_c = coeff * p
             new_p = p - 1
 
             if new_p == 0:
-                c_fmt = f"{new_c:g}"
-                diff_terms.append(c_fmt)
+                diff_terms.append(f"{new_c:g}")
             elif new_p == 1:
                 c_fmt = (
                     ""
@@ -78,7 +110,10 @@ def diff_expression(expr_str, target_var):
                 )
                 diff_terms.append(f"{c_fmt}{target_var}^{new_p}")
         else:
-            # Fallback if unparseable complex inner term
+            # Explicit fallback warning for unparsed non-standard math strings
+            print(
+                f"  [Warning: High-complexity expression '{term}' simplified to derivative 1]"
+            )
             diff_terms.append("1")
 
     if not diff_terms:
@@ -89,7 +124,7 @@ def diff_expression(expr_str, target_var):
 
 
 def differentiate_chain_stack(funcs, inner_expr, target_var, constant=1.0):
-    """Applies Chain Rule with inner expressions using word boundary checks."""
+    """Applies Chain Rule with nested outer functions and dynamic inner derivatives."""
     if not contains_var(inner_expr, target_var):
         return {"result_str": "0", "is_zero": True}
 
@@ -114,8 +149,7 @@ def differentiate_chain_stack(funcs, inner_expr, target_var, constant=1.0):
             else:
                 derived_parts.append(f"{d_func}({inner_expr})")
         else:
-            term = f"{d_func}({current_inner})"
-            derived_parts.append(term)
+            derived_parts.append(f"{d_func}({current_inner})")
 
         current_inner = f"{f}({current_inner})"
 
@@ -127,11 +161,15 @@ def differentiate_chain_stack(funcs, inner_expr, target_var, constant=1.0):
         "" if final_const == 1 else ("-" if final_const == -1 else f"{final_const:g}")
     )
 
-    return {"result_str": c_str + "".join(derived_parts), "is_zero": False}
+    raw_res = c_str + "".join(derived_parts)
+    return {
+        "result_str": simplify_expression_str(raw_res),
+        "is_zero": False,
+    }
 
 
 def build_bracket_str(b):
-    """Utility to render a bracket representation as string."""
+    """Renders a bracket representation into string format."""
     expr = b["inner"]
     for f in reversed(b["funcs"]):
         expr = f"{f}({expr})"
@@ -139,7 +177,7 @@ def build_bracket_str(b):
 
 
 def differentiate_multi_term(term_data, target_var):
-    """Applies Product Rule when multiple brackets share the target variable."""
+    """Executes Product Rule across all brackets containing the target variable."""
     brackets = term_data.get("brackets", [])
     const = term_data.get("const", 1.0)
 
@@ -152,7 +190,6 @@ def differentiate_multi_term(term_data, target_var):
 
     product_terms = []
 
-    # Product Rule sum over matching target indices: sum( d(b_i)/dx * prod_{j!=i} b_j )
     for target_idx in target_indices:
         diff_res = differentiate_chain_stack(
             brackets[target_idx]["funcs"],
@@ -176,14 +213,31 @@ def differentiate_multi_term(term_data, target_var):
     if not product_terms:
         return "0"
 
-    combined = " + ".join(product_terms).replace("+ -", "- ")
+    combined = " + ".join(product_terms)
     c_fmt = "" if const == 1.0 else ("-" if const == -1.0 else f"{const:g}")
 
-    return f"{c_fmt}({combined})" if len(product_terms) > 1 and const != 1.0 else f"{c_fmt}{combined}"
+    raw_out = (
+        f"{c_fmt}({combined})"
+        if len(product_terms) > 1 and const != 1.0
+        else f"{c_fmt}{combined}"
+    )
+    return simplify_expression_str(raw_out)
+
+
+def get_all_variables_in_system(system_terms):
+    """Extracts all unique variables present across all brackets."""
+    vars_found = set()
+    for term in system_terms:
+        for b in term.get("brackets", []):
+            matches = re.findall(r"\b[a-zA-Z_][a-zA-Z0-9_]*\b", b["inner"])
+            for m in matches:
+                if m not in BASE_DERIVATIVES:
+                    vars_found.add(m)
+    return list(vars_found)
 
 
 def format_term_display(term_data):
-    """Formats terms cleanly for display."""
+    """Formats mathematical terms cleanly for printing."""
     brackets = term_data.get("brackets", [])
     const = term_data.get("const", 1.0)
 
@@ -207,14 +261,15 @@ def main_menu():
     system_terms = []
 
     while True:
-        print("===============================")
-        print("    DIFFERENTIATION MENU v2.1   ")
-        print("===============================")
+        print("==========================================")
+        print("    SYMBOLIC DIFFERENTIATION ENGINE v3.0  ")
+        print("==========================================")
         print("1. Add Single/Composite Term (e.g. 5cos(x+1))")
         print("2. Add Product Term (e.g. sin(u)exp(u))")
         print("3. Display Current System")
-        print("4. Differentiate System")
-        print("5. Reset System")
+        print("4. Compute Partial Derivative (∂f / ∂x)")
+        print("5. Compute Total Derivative (df / dt)")
+        print("6. Reset System")
         print("E. Exit")
 
         choice = input("\nChoose an option: ").strip().upper()
@@ -228,7 +283,7 @@ def main_menu():
                 const = 1.0
 
             inner = input(
-                "Enter inner expression (e.g. x+1, 2x, x^2+1): "
+                "Enter inner expression (e.g. x+1, sin(x), x^2+1): "
             ).strip()
 
             print("Supported functions:", ", ".join(BASE_DERIVATIVES.keys()))
@@ -262,7 +317,9 @@ def main_menu():
             for i in range(1, num_factors + 1):
                 print(f"\n--- Factor #{i} ---")
                 inner = input("Enter inner expression (e.g. u, u+1): ").strip()
-                funcs_str = input("Enter functions (comma separated or blank): ").strip()
+                funcs_str = input(
+                    "Enter functions (comma separated or blank): "
+                ).strip()
                 func_list = (
                     [f.strip().lower() for f in funcs_str.split(",") if f.strip()]
                     if funcs_str
@@ -283,7 +340,7 @@ def main_menu():
                 continue
 
             target_var = input(
-                "Differentiate with respect to variable (e.g. x, u): "
+                "Differentiate partially with respect to variable (e.g. x, u): "
             ).strip()
             diff_results = []
 
@@ -293,16 +350,56 @@ def main_menu():
                     diff_results.append(res)
 
             print("\n==========================================")
-            print(f" DERIVATIVE w.r.t {target_var}:")
+            print(f" PARTIAL DERIVATIVE w.r.t {target_var}:")
             print("==========================================")
             if not diff_results:
                 print(f"∂f / ∂{target_var} = 0")
             else:
-                out = " + ".join(diff_results).replace("+ -", "- ")
+                out = simplify_expression_str(" + ".join(diff_results))
                 print(f"∂f / ∂{target_var} = {out}")
             print("==========================================\n")
 
         elif choice == "5":
+            if not system_terms:
+                print("\nNo terms to differentiate!")
+                continue
+
+            param_t = input(
+                "Enter independent parameter variable (default 't'): "
+            ).strip() or "t"
+            all_vars = get_all_variables_in_system(system_terms)
+
+            if not all_vars:
+                print("df/dt = 0")
+                continue
+
+            total_parts = []
+            for v in all_vars:
+                diff_results = []
+                for term in system_terms:
+                    res = differentiate_multi_term(term, v)
+                    if res != "0":
+                        diff_results.append(res)
+
+                if diff_results:
+                    partial_str = simplify_expression_str(
+                        " + ".join(diff_results)
+                    )
+                    if v == param_t:
+                        total_parts.append(f"({partial_str})")
+                    else:
+                        total_parts.append(f"({partial_str})*(d{v}/d{param_t})")
+
+            print("\n==========================================")
+            print(f" TOTAL DERIVATIVE df / d{param_t}:")
+            print("==========================================")
+            if not total_parts:
+                print(f"df / d{param_t} = 0")
+            else:
+                print(f"df / d{param_t} = " + " + ".join(total_parts))
+            print("==========================================\n")
+
+        elif choice == "6":
             system_terms.clear()
             print("\nCleared system!")
 
